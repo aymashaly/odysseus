@@ -69,6 +69,8 @@ _TOOL_CODE_RE = re.compile(
 # fullwidth (U+FF5C) and ascii '|' in any count.
 _DSML_PIPES = r"[｜|]+"
 def _normalize_dsml(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
     if "DSML" not in text:
         return text
     t = text
@@ -95,6 +97,13 @@ _TOOL_NAME_MAP = {
     "search": "web_search",
     "web_search": "web_search",
     "websearch": "web_search",
+    "google_search": "web_search",
+    "google_search_retrieval": "web_search",
+    "google_search_grounding": "web_search",
+    "web_fetch": "web_fetch",
+    "webfetch": "web_fetch",
+    "fetch_url": "web_fetch",
+    "fetch": "web_fetch",
     "read": "read_file",
     "read_file": "read_file",
     "cat": "read_file",
@@ -305,6 +314,8 @@ def _parse_tool_code_block(raw: str) -> Optional[ToolBlock]:
             content = xml_params.get("code", args_body)
         elif mapped == "web_search":
             content = xml_params.get("query", args_body)
+        elif mapped == "web_fetch":
+            content = xml_params.get("url", args_body)
         elif mapped in ("read_file", "write_file"):
             content = xml_params.get("path", xml_params.get("file_path", args_body))
         else:
