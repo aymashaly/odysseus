@@ -2,6 +2,7 @@
 """Multi-provider TTS service — dispatches to local Kokoro, OpenAI-compatible API, or browser."""
 
 import io
+import os
 import wave
 import logging
 import hashlib
@@ -27,6 +28,7 @@ class TTSService:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._kokoro = None  # lazy-init
+        self._piper = None   # lazy-init
 
     # ── Settings ──
 
@@ -38,6 +40,10 @@ class TTSService:
             "tts_model": saved.get("tts_model", "tts-1"),
             "tts_voice": saved.get("tts_voice", "alloy"),
             "tts_speed": saved.get("tts_speed", "1"),
+            "tts_piper_voice": saved.get("tts_piper_voice", "en_US-amy-medium"),
+            "tts_piper_length_scale": saved.get("tts_piper_length_scale", 1.0),
+            "tts_piper_noise_scale": saved.get("tts_piper_noise_scale", 0.667),
+            "tts_piper_noise_w": saved.get("tts_piper_noise_w", 0.8),
         }
 
     @property
@@ -51,6 +57,9 @@ class TTSService:
         if provider == "local":
             kokoro = self._get_kokoro()
             return kokoro is not None and kokoro.available
+        if provider == "piper":
+            piper = self._get_piper()
+            return piper is not None and piper.available
         if provider.startswith("endpoint:"):
             return True  # assume reachable; errors surface at synthesis time
         return False
@@ -85,6 +94,13 @@ class TTSService:
         if self._kokoro is None:
             self._kokoro = _KokoroPipeline()
         return self._kokoro
+
+    # ── Piper (local CPU) ──
+
+    def _get_piper(self):
+        if self._piper is None:
+            self._piper = _PiperPipeline()
+        return self._piper
 
     # ── API endpoint ──
 
@@ -155,6 +171,20 @@ class TTSService:
             else:
                 logger.warning("Kokoro TTS not available")
                 return None
+        elif provider == "piper":
+            piper = self._get_piper()
+            if piper and piper.available:
+                settings_full = self._load_settings()
+                audio_data = piper.synthesize_raw(
+                    text,
+                    voice=settings_full.get("tts_piper_voice", "en_US-amy-medium"),
+                    length_scale=settings_full.get("tts_piper_length_scale", 1.0),
+                    noise_scale=settings_full.get("tts_piper_noise_scale", 0.667),
+                    noise_w=settings_full.get("tts_piper_noise_w", 0.8),
+                )
+            else:
+                logger.warning("Piper TTS not available")
+                return None
         elif provider.startswith("endpoint:"):
             endpoint_id = provider.split(":", 1)[1]
             audio_data = self._synthesize_api(text, endpoint_id, model, voice, speed)
@@ -203,6 +233,12 @@ class TTSService:
             stats["model"] = "Kokoro-82M (GPU)" if (kokoro and kokoro.available) else "Kokoro (not loaded)"
         elif provider == "browser":
             stats["model"] = "Browser (Web Speech API)"
+        elif provider == "piper":
+            piper = self._get_piper()
+            stats["model"] = (
+                f"Piper {settings.get('tts_piper_voice', 'en_US-amy-medium')} (CPU)"
+                if (piper and piper.available) else "Piper (not loaded)"
+            )
         elif provider.startswith("endpoint:"):
             stats["endpoint_id"] = provider.split(":", 1)[1]
 
@@ -265,6 +301,143 @@ class _KokoroPipeline:
             return buf.getvalue()
         except Exception as e:
             logger.error(f"Kokoro synthesis failed: {e}", exc_info=True)
+            return None
+
+
+class _PiperPipeline:
+    """Encapsulates the Piper TTS local CPU pipeline.
+
+    Piper is a fast, local, ONNX-based TTS system. Each voice is a small
+    .onnx file (15-60 MB) plus a .onnx.json config. No GPU required, so it
+    works on any machine. Used here as a CPU-friendly alternative to Kokoro.
+    """
+
+    # Default models are stored under data/piper_models/. Users can drop
+    # additional .onnx / .onnx.json pairs there and reference them by stem.
+    DEFAULT_VOICE = "en_US-amy-medium"
+    MODELS_DIR = Path("data/piper_models")
+
+    def __init__(self):
+        self.voice = None
+        self.config = None
+        self.config_path = None
+        self.model_path = None
+        self.sample_rate = 22050
+        self.available = False
+        self._loaded_voice_name: Optional[str] = None
+        self.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        self._init()
+
+    def _init(self):
+        try:
+            from piper import PiperVoice  # noqa: F401  (presence check)
+        except ImportError as e:
+            logger.warning("Piper TTS not available: %s", e)
+            logger.warning("Install with: pip install piper-tts")
+            return
+        # We don't load the model here — load it lazily on first synthesize
+        # so importing this module is cheap and only-imports-without-model
+        # configs don't pay the model-load cost.
+        self.available = True
+        logger.info("Piper TTS runtime available (model will load on first use)")
+
+    def _resolve_model(self, voice: str) -> Optional[tuple]:
+        """Find the .onnx + .onnx.json pair for a voice name.
+
+        Resolution order:
+          1. Explicit path passed in (if `voice` contains a separator)
+          2. <MODELS_DIR>/<voice>.onnx + .onnx.json
+        """
+        from piper import PiperVoice
+
+        # If a path was passed, use it directly
+        if os.sep in voice or "/" in voice:
+            onnx = Path(voice)
+            if onnx.is_file() and onnx.suffix == ".onnx":
+                cfg = onnx.with_suffix(".onnx.json")
+                if cfg.is_file():
+                    return onnx, cfg
+            logger.error("Piper voice path not found or missing config: %s", voice)
+            return None
+
+        # Default models dir
+        onnx = self.MODELS_DIR / f"{voice}.onnx"
+        cfg = self.MODELS_DIR / f"{voice}.onnx.json"
+        if onnx.is_file() and cfg.is_file():
+            return onnx, cfg
+
+        logger.error(
+            "Piper voice '%s' not found in %s. "
+            "Download a voice from https://github.com/rhasspy/piper/releases "
+            "and place the .onnx + .onnx.json files in that directory.",
+            voice, self.MODELS_DIR,
+        )
+        return None
+
+    def _ensure_loaded(self, voice: str) -> bool:
+        """Load the model if not already loaded for this voice. Returns
+        True if a usable model is in memory."""
+        from piper import PiperVoice
+
+        if self._loaded_voice_name == voice and self.voice is not None:
+            return True
+
+        paths = self._resolve_model(voice)
+        if not paths:
+            return False
+
+        onnx_path, cfg_path = paths
+        try:
+            logger.info("Loading Piper voice '%s' from %s", voice, onnx_path)
+            self.voice = PiperVoice.load(str(onnx_path), str(cfg_path))
+            self.config_path = str(cfg_path)
+            self.model_path = str(onnx_path)
+            self.sample_rate = self.voice.config.sample_rate
+            self._loaded_voice_name = voice
+            logger.info("Piper voice '%s' loaded (sample_rate=%d)", voice, self.sample_rate)
+            return True
+        except Exception as e:
+            logger.error("Failed to load Piper voice '%s': %s", voice, e, exc_info=True)
+            self.voice = None
+            self._loaded_voice_name = None
+            return False
+
+    def synthesize_raw(
+        self,
+        text: str,
+        voice: str = DEFAULT_VOICE,
+        length_scale: float = 1.0,
+        noise_scale: float = 0.667,
+        noise_w: float = 0.8,
+    ) -> Optional[bytes]:
+        if not self.available:
+            return None
+        if not text or not text.strip():
+            return None
+        if not self._ensure_loaded(voice):
+            return None
+
+        try:
+            from piper import SynthesisConfig
+
+            syn_config = SynthesisConfig(
+                length_scale=length_scale,
+                noise_scale=noise_scale,
+                noise_w_scale=noise_w,
+            )
+
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(self.sample_rate)
+                # Piper streams chunks; we write each into the wav file as
+                # it arrives. This keeps memory flat for long responses.
+                for chunk in self.voice.synthesize(text, syn_config=syn_config):
+                    wf.writeframes(chunk.audio_int16_bytes)
+            return buf.getvalue()
+        except Exception as e:
+            logger.error("Piper synthesis failed: %s", e, exc_info=True)
             return None
 
 

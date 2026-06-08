@@ -389,6 +389,11 @@ async def build_chat_context(
     # Skills injection respects its own enable toggle (mirrors memory_enabled).
     # When off, the "Available skills" index is not added to the prompt.
     skills_enabled = not incognito and uprefs.get("skills_enabled", True)
+    # Harness: user-defined system prompt that is ALWAYS prepended (never
+    # relevance-filtered like memories). Off in incognito — the user opted
+    # out of any retained context that turn. Off when the toggle is off.
+    harness_enabled = not incognito and uprefs.get("harness_enabled", True)
+    harness_system_prompt = uprefs.get("harness_system_prompt") or ""
     logger.debug(
         "Memory enabled=%s for user=%s (incognito=%s, no_memory=%s, pref=%s)",
         mem_enabled, user, incognito, no_memory, uprefs.get("memory_enabled", "NOT_SET"),
@@ -418,6 +423,8 @@ async def build_chat_context(
         agent_mode=agent_mode,
         incognito=incognito,
         use_skills=skills_enabled,
+        harness_system_prompt=harness_system_prompt,
+        harness_enabled=harness_enabled,
     )
     if use_rag is not None:
         _preface_kwargs["use_rag"] = use_rag_val

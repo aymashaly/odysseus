@@ -509,6 +509,32 @@ app.include_router(setup_chat_routes(
     skills_manager=skills_manager,
 ))
 
+# Telegram bot singleton — long-polling, started in startup_event. The
+# singleton is built unconditionally so the admin /api/telegram/status
+# endpoint can report whether TELEGRAM_BOT_TOKEN is set, but the actual
+# poller only runs when a token is present. Passing the full dep bundle
+# here means the bot's _on_text handler can call build_chat_context with
+# the same chat_handler/chat_processor/session_manager the web UI uses —
+# no duplicate pipeline.
+try:
+    from services.telegram_bot import init_telegram_bot
+    _telegram_deps = {
+        "session_manager": session_manager,
+        "chat_handler": chat_handler,
+        "chat_processor": chat_processor,
+        "memory_manager": memory_manager,
+        "memory_vector": memory_vector,
+        "research_handler": research_handler,
+        "upload_handler": upload_handler,
+        "preset_manager": preset_manager,
+        "skills_manager": skills_manager,
+        "webhook_manager": webhook_manager,
+        "auth_manager": auth_manager,
+    }
+    init_telegram_bot(_telegram_deps)
+except Exception as _e:
+    logger.warning("Telegram bot init skipped: %s", _e)
+
 # Research (background deep-research tasks)
 from routes.research_routes import setup_research_routes
 app.include_router(setup_research_routes(research_handler, session_manager=session_manager))
@@ -606,6 +632,17 @@ app.include_router(setup_compare_routes(session_manager))
 # User Preferences
 from routes.prefs_routes import setup_prefs_routes
 app.include_router(setup_prefs_routes())
+
+# Personality (read-only access to bundled harness files like memory.md)
+from routes.personality_routes import setup_personality_routes
+app.include_router(setup_personality_routes())
+
+# Telegram bot (phone access + voice notes) — status/start/stop/test
+# endpoints. The bot itself is started by the startup_event below; the
+# routes are always available so admins can verify wiring even when the
+# bot is disabled.
+from routes.telegram_routes import setup_telegram_routes
+app.include_router(setup_telegram_routes())
 
 # Backup (export/import user data)
 from routes.backup_routes import setup_backup_routes
@@ -977,6 +1014,21 @@ async def startup_event():
                 logger.warning(f"Nightly skill audit failed: {e}")
 
     _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
+
+    # Telegram bot — long-polling, only starts when TELEGRAM_BOT_TOKEN is
+    # set. Best-effort: a failure here must not block the web app. We
+    # do this AFTER other startup tasks so the bot has a fully-warm
+    # chat pipeline to call into.
+    try:
+        from services.telegram_bot import get_telegram_bot
+        _telegram_bot = get_telegram_bot()
+        if _telegram_bot is not None:
+            _startup_tasks.append(asyncio.create_task(_telegram_bot.start()))
+        else:
+            logger.info("Telegram bot not configured (TELEGRAM_BOT_TOKEN unset)")
+    except Exception as _e:
+        logger.warning("Telegram bot start skipped: %s", _e)
+
     logger.info("Application startup complete")
 
 @app.on_event("shutdown")
@@ -1003,4 +1055,13 @@ async def shutdown_event():
         await mcp_manager.disconnect_all()
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
+    # Stop the Telegram poller so the long-poll loop exits cleanly. Best-
+    # effort — if it never started, this is a no-op.
+    try:
+        from services.telegram_bot import get_telegram_bot
+        _telegram_bot = get_telegram_bot()
+        if _telegram_bot is not None:
+            await _telegram_bot.stop()
+    except Exception as e:
+        logger.debug(f"Telegram shutdown error: {e}")
     logger.info("Application shutdown complete")

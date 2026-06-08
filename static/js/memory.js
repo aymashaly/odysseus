@@ -99,6 +99,8 @@ async function syncToggles() {
   await syncPrefToggle('auto-approve-skills-toggle', 'auto_approve_skills', 'Auto-approve skills enabled', 'Auto-approve skills disabled', false);
   await syncPrefSlider('skill-confidence-slider', 'skill_min_confidence', 'skill-confidence-label', 0.85);
   await syncPrefNumber('skill-max-input', 'skill_max_injected', 3);
+  // Harness — system prompt always prepended to every chat (chat + agent).
+  await syncHarness();
 
   // Reflect the header toggle into the sidebar dim + modal body opacity.
   const headerToggle = document.getElementById('memory-enabled-header-toggle');
@@ -131,6 +133,150 @@ async function syncToggles() {
 function reflectMemoryToggleInSidebar(enabled) {
   const btn = document.getElementById('tool-memory-btn');
   if (btn) btn.classList.toggle('tool-disabled', !enabled);
+}
+
+// ── Harness ────────────────────────────────────────────────────────────── //
+// User-defined system prompt that is ALWAYS prepended to every chat and
+// agent request (unlike memories, the model cannot opt out of following
+// it). Backed by two prefs: `harness_system_prompt` (string) and
+// `harness_enabled` (bool).
+
+let _harnessSaveTimer = null;
+let _harnessLoaded = false;
+
+function _harnessStatus(text) {
+  const el = document.getElementById('harness-status');
+  if (!el) return;
+  const len = (text || '').length;
+  el.textContent = len
+    ? `Saved — ${len.toLocaleString()} character${len === 1 ? '' : 's'} will be sent with every request.`
+    : 'Empty — the model will fall back to its default behavior.';
+  el.style.opacity = len ? '0.85' : '0.6';
+}
+
+async function _saveHarnessPref(key, value) {
+  try {
+    const res = await fetch(`${window.location.origin}/api/prefs/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    });
+    if (!res.ok) {
+      showError('Failed to save harness preference');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error(`Failed to save ${key}:`, e);
+    showError('Failed to save harness preference');
+    return false;
+  }
+}
+
+async function syncHarness() {
+  const toggle = document.getElementById('harness-enabled-toggle');
+  const textarea = document.getElementById('harness-system-prompt');
+  const clearBtn = document.getElementById('harness-clear-btn');
+  const loadRoseBtn = document.getElementById('harness-load-rose-btn');
+  if (!toggle || !textarea) return;
+
+  // Load the persisted prompt + enabled state from prefs.
+  let prompt = '';
+  let enabled = true;
+  try {
+    const [p, e] = await Promise.all([
+      fetch(`${window.location.origin}/api/prefs/harness_system_prompt`),
+      fetch(`${window.location.origin}/api/prefs/harness_enabled`),
+    ]);
+    if (p.ok) {
+      const data = await p.json();
+      prompt = (data && data.value) || '';
+    }
+    if (e.ok) {
+      const data = await e.json();
+      enabled = data && data.value === false ? false : true;
+    }
+  } catch (err) {
+    console.error('Failed to load harness prefs:', err);
+  }
+
+  // Only seed the textarea the first time we open the modal — otherwise
+  // a re-render would clobber what the user is typing.
+  if (!_harnessLoaded) {
+    textarea.value = prompt;
+    _harnessLoaded = true;
+  }
+  toggle.checked = enabled;
+  _harnessStatus(textarea.value);
+
+  if (!toggle.dataset.bound) {
+    toggle.dataset.bound = '1';
+    toggle.addEventListener('change', async () => {
+      const ok = await _saveHarnessPref('harness_enabled', toggle.checked);
+      if (!ok) toggle.checked = !toggle.checked;  // revert on failure
+      showToast(toggle.checked ? 'Harness enabled' : 'Harness disabled');
+    });
+  }
+
+  if (!textarea.dataset.bound) {
+    textarea.dataset.bound = '1';
+    // Debounce auto-save: wait 600ms after the last keystroke so a long
+    // paste doesn't fire dozens of PUTs. Saves on every pause, on blur,
+    // and beforeunload.
+    const flush = async () => {
+      if (_harnessSaveTimer) { clearTimeout(_harnessSaveTimer); _harnessSaveTimer = null; }
+      _harnessStatus(textarea.value);
+      await _saveHarnessPref('harness_system_prompt', textarea.value);
+    };
+    textarea.addEventListener('input', () => {
+      _harnessStatus(textarea.value);
+      if (_harnessSaveTimer) clearTimeout(_harnessSaveTimer);
+      _harnessSaveTimer = setTimeout(() => {
+        _harnessSaveTimer = null;
+        _saveHarnessPref('harness_system_prompt', textarea.value);
+      }, 600);
+    });
+    textarea.addEventListener('blur', flush);
+    window.addEventListener('beforeunload', flush);
+  }
+
+  if (clearBtn && !clearBtn.dataset.bound) {
+    clearBtn.dataset.bound = '1';
+    clearBtn.addEventListener('click', async () => {
+      if (!textarea.value) return;
+      if (!window.confirm('Clear the harness? The model will fall back to its default behavior.')) return;
+      textarea.value = '';
+      _harnessStatus('');
+      await _saveHarnessPref('harness_system_prompt', '');
+      showToast('Harness cleared');
+    });
+  }
+
+  if (loadRoseBtn && !loadRoseBtn.dataset.bound) {
+    loadRoseBtn.dataset.bound = '1';
+    loadRoseBtn.addEventListener('click', async () => {
+      try {
+        const res = await fetch(`${window.location.origin}/api/personality/rose`);
+        if (!res.ok) {
+          showError('Failed to load Rose personality');
+          return;
+        }
+        const data = await res.json();
+        const text = (data && data.content) || '';
+        if (!text) {
+          showError('Rose personality file is empty');
+          return;
+        }
+        textarea.value = text;
+        _harnessStatus(text);
+        const ok = await _saveHarnessPref('harness_system_prompt', text);
+        if (ok) showToast('Loaded Rose personality into harness');
+      } catch (e) {
+        console.error('Failed to load Rose personality:', e);
+        showError('Failed to load Rose personality');
+      }
+    });
+  }
 }
 
 function syncToggleDim(toggle) {

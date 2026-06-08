@@ -552,7 +552,21 @@ def _build_system_prompt(
         _ov_sig = _hl.sha256(_json.dumps(get_builtin_overrides() or {}, sort_keys=True).encode()).hexdigest()
     except Exception:
         _ov_sig = ""
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig)
+    # Include a signature of the user-defined harness so editing it in
+    # the Brain → Harness tab takes effect on the next request (without
+    # this, the cached base prompt would lock the harness in place).
+    _harness_sig = ""
+    _harness_text = ""
+    try:
+        from routes.prefs_routes import _load_for_user as _load_prefs
+        _harness_prefs = _load_prefs(owner) or {}
+        if _harness_prefs.get("harness_enabled", True):
+            _harness_text = (_harness_prefs.get("harness_system_prompt") or "").strip()
+        if _harness_text:
+            _harness_sig = _hl.sha256(_harness_text.encode()).hexdigest()
+    except Exception:
+        pass
+    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, _harness_sig)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
     else:
@@ -564,6 +578,14 @@ def _build_system_prompt(
             mcp_disabled_map=mcp_disabled_map,
             compact=compact,
         )
+        # Prepend the user's harness as the FIRST instruction the agent
+        # sees. This is the "always followed" layer — unlike memories (which
+        # are RAG-retrieved and may be ignored) the harness is unconditional.
+        if _harness_text:
+            agent_prompt = (
+                "## User-defined harness (always follow these rules)\n"
+                f"{_harness_text}\n\n"
+            ) + agent_prompt
         if not active_document:
             _cached_base_prompt = agent_prompt
             _cached_base_prompt_key = cache_key

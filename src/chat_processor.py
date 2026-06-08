@@ -170,6 +170,8 @@ class ChatProcessor:
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
+        harness_system_prompt: Optional[str] = None,
+        harness_enabled: bool = True,
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
         """Build the context preface for LLM calls.
 
@@ -178,6 +180,17 @@ class ChatProcessor:
         """
         preface = []
         rag_sources = []
+
+        # Harness: user-defined system prompt that is ALWAYS prepended
+        # (never relevance-filtered). This is the "Rose personality" / custom
+        # instruction layer the user wants the model to always follow. Off
+        # in incognito mode (the user explicitly opted out of context that
+        # turn) and when the user toggled the harness off in Settings.
+        if harness_enabled and harness_system_prompt and harness_system_prompt.strip():
+            preface.append({
+                "role": "system",
+                "content": harness_system_prompt.strip(),
+            })
 
         # Add preset system prompt if specified
         if preset_system_prompt:

@@ -44,6 +44,14 @@ DEFAULT_SETTINGS = {
     "tts_model": "tts-1",
     "tts_voice": "alloy",
     "tts_speed": "1",
+    # Piper TTS (local CPU). Voice name is the file stem of the .onnx model
+    # placed under data/piper_models/<voice>.onnx (+ .onnx.json). Download
+    # voices from https://github.com/rhasspy/piper/releases. en_US-amy-medium
+    # is a natural-sounding female voice (~60 MB), good default for Rose.
+    "tts_piper_voice": "en_US-amy-medium",
+    "tts_piper_length_scale": 1.0,
+    "tts_piper_noise_scale": 0.667,
+    "tts_piper_noise_w": 0.8,
     "stt_enabled": False,
     "stt_provider": "disabled",
     "stt_model": "base",

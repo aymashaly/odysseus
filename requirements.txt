@@ -37,5 +37,15 @@ mcp
 pyotp
 qrcode[pil]
 croniter
+# Telegram bot for phone access (services/telegram_bot.py). Long-polling
+# only — no public URL or webhook needed. The Telegram poller is only
+# started when TELEGRAM_BOT_TOKEN is set in .env, so this dep is
+# effectively optional in practice but harmless to install.
+python-telegram-bot>=20.7
+# Piper TTS — local CPU text-to-speech (services/tts/tts_service.py).
+# Lightweight ONNX-based voices (~15-60 MB), no GPU required. Used as the
+# default TTS backend for Telegram voice notes so the bot can speak on
+# machines without a CUDA GPU.
+piper-tts>=1.2.0
 pytest
 pytest-asyncio
